@@ -323,11 +323,12 @@
     const tireW = isDriveDual ? 0.44 : 0.31;
     const parts = [];
 
+    /* four material groups keep a full 3D wheel down to three draw calls */
     const mTire = new THREE.MeshStandardMaterial({ color: 0x181a1f, roughness: 0.88, metalness: 0.08 });
-    const mSide = new THREE.MeshStandardMaterial({ color: 0x242830, roughness: 0.72, metalness: 0.14 });
+    const mSide = mTire;
     const mRim = new THREE.MeshStandardMaterial({ color: 0xd8e0ea, roughness: 0.24, metalness: 0.82 });
     const mDarkRim = new THREE.MeshStandardMaterial({ color: 0x2e3642, roughness: 0.42, metalness: 0.58 });
-    const mDisc = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.35, metalness: 0.85 });
+    const mDisc = mDarkRim;
 
     // Sculpted tire barrel & curved shoulder walls
     parts.push({ g: cyl(r, r, tireW, 24, 0, 0, 0, 0, 0, Math.PI * 0.5), m: mTire });
@@ -709,6 +710,401 @@
     };
   }
 
+
+  /* ==========================================================================
+     PHOTOREAL HYBRID GLB COACH ENGINE
+     The curved monocoque body shells are real binary glTF 2.0 meshes (lofted
+     superellipse bodywork with a wrap-around nose, crowned roof and clear
+     glazing).  Everything that makes a bus feel alive inside — the sculpted
+     seating, the cockpit, the grab rails, the lighting — is generated here as
+     high-detail Three.js geometry and merged into a handful of draw calls.
+     ========================================================================== */
+
+  /* geometry of each authored coach shell, in the shell's own metres */
+  var COACH_GEO = {
+    metro: {
+      hw: 1.275, yBot: 0.28, belt: 1.26, winTop: 2.62, roof: 3.18,
+      wheelF: 3.72, wheelR: -3.28, arch: 0.58, rake: 0.34,
+      doors: [[4.59, 5.45, 0.40, 2.47], [-4.70, -3.97, 0.40, 2.47]]
+    },
+    viking: {
+      hw: 1.250, yBot: 0.36, belt: 1.44, winTop: 2.86, roof: 3.42,
+      wheelF: 3.50, wheelR: -3.10, arch: 0.60, rake: 0.22,
+      doors: [[4.50, 5.25, 0.44, 2.71]]
+    },
+    express: {
+      hw: 1.275, yBot: 0.34, belt: 1.64, winTop: 3.04, roof: 3.68,
+      wheelF: 3.92, wheelR: -3.45, arch: 0.62, rake: 0.48,
+      doors: [[4.70, 5.58, 0.46, 2.89]]
+    },
+    electro: {
+      hw: 1.275, yBot: 0.27, belt: 1.24, winTop: 2.66, roof: 3.30,
+      wheelF: 3.85, wheelR: -3.35, arch: 0.58, rake: 0.38,
+      doors: [[4.63, 5.49, 0.40, 2.51], [-4.74, -4.00, 0.40, 2.51]]
+    },
+    ai: {
+      hw: 1.240, yBot: 0.34, belt: 1.36, winTop: 2.76, roof: 3.32,
+      wheelF: 3.45, wheelR: -3.02, arch: 0.58, rake: 0.30,
+      doors: [[4.40, 5.15, 0.40, 2.61]]
+    }
+  };
+
+  function buildGLBCoach(modelId, cfg, routeObj) {
+    var WM = global.WORLD_MODELS;
+    var spec = CATALOG[modelId] || CATALOG.metro;
+    var shell = WM.coachShell(modelId);
+    if (!shell) return null;
+    var G = COACH_GEO[modelId] || COACH_GEO.metro;
+    var Lg = WM.busLength[modelId] || spec.lengthM;
+    var L2g = Lg * 0.5;
+    var s = spec.lengthM / Lg;
+    var HW = G.hw;
+
+    var root = new THREE.Group();
+    var tilt = new THREE.Group();
+    var body = new THREE.Group();
+    root.add(tilt);
+    tilt.add(body);
+    body.scale.setScalar(s);
+    body.add(shell);
+
+    var liv = liveryFromCfg(cfg, modelId);
+    var isExpr = modelId === 'express';
+    var isElec = modelId === 'electro';
+    var isMetro = modelId === 'metro';
+
+    /* ---- shell materials: the livery is painted straight onto the GLB meshes ---- */
+    var paintMeshes = WM.meshesNamed(shell, ['PaintShell', 'AccentShell', 'RoofPod']);
+    var paintMats = [];
+    paintMeshes.forEach(function (m) {
+      var n = m.name;
+      if (n === 'PaintShell') m.material.color.setHex(liv.hex);
+      else if (n === 'AccentShell') m.material.color.setHex(liv.trimHex);
+      else m.material.color.setHex((cfg && cfg.roof) || 0xdbe2ea);
+      m.material.metalness = 0.42;
+      m.material.roughness = 0.19;
+      m.material.envMapIntensity = 1.45;
+      m.material.needsUpdate = true;
+      paintMats.push(m.material);
+    });
+    var glassMesh = WM.meshesNamed(shell, ['CabinGlass'])[0];
+    if (glassMesh) {
+      glassMesh.material.transparent = true;
+      glassMesh.material.opacity = 0.46;
+      glassMesh.material.roughness = 0.05;
+      glassMesh.material.metalness = 0.28;
+      glassMesh.material.envMapIntensity = 1.8;
+      glassMesh.material.side = THREE.DoubleSide;
+      glassMesh.material.needsUpdate = true;
+    }
+
+    /* ---- detail materials ---- */
+    var hlMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff3cc, emissiveIntensity: 0.65, roughness: 0.10 });
+    var drlMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: isElec ? 0x22d3ee : 0xf0f9ff, emissiveIntensity: 1.7, roughness: 0.10 });
+    var tailMat = new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xdc2626, emissiveIntensity: 0.5, roughness: 0.18 });
+    var fogMat = new THREE.MeshStandardMaterial({ color: 0xfef08a, emissive: 0xfbbf24, emissiveIntensity: 0.25, roughness: 0.15 });
+    var blinkLMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.12 });
+    var blinkRMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.12 });
+    var cabinMat = new THREE.MeshBasicMaterial({ color: 0xcfcabc });
+    var mChrome = new THREE.MeshStandardMaterial({ color: 0xdfe6ef, roughness: 0.14, metalness: 0.94, envMapIntensity: 1.7 });
+    var mDark = new THREE.MeshStandardMaterial({ color: 0x14181f, roughness: 0.62, metalness: 0.24 });
+    var mFloor = new THREE.MeshStandardMaterial({ color: 0x3a3f49, roughness: 0.92 });
+    var mMat = new THREE.MeshStandardMaterial({ color: 0x6b1d22, roughness: 0.98 });
+    var mCeil = new THREE.MeshStandardMaterial({ color: 0xeeece4, roughness: 0.86 });
+    var mSeat = new THREE.MeshStandardMaterial({ color: isElec ? 0x0369a1 : isExpr ? 0x8b3a12 : 0x1d4ed8, roughness: 0.68 });
+    var mSeat2 = new THREE.MeshStandardMaterial({ color: isElec ? 0x075985 : isExpr ? 0x6b2a0c : 0x163690, roughness: 0.72 });
+    var mFrame = new THREE.MeshStandardMaterial({ color: 0x9aa3ad, roughness: 0.34, metalness: 0.82 });
+    var mTrim = new THREE.MeshStandardMaterial({ color: 0x2b3037, roughness: 0.72, metalness: 0.18 });
+    var mGlass2 = new THREE.MeshPhysicalMaterial({ color: 0x9fd8ff, roughness: 0.05, metalness: 0.10, transparent: true, opacity: 0.24, depthWrite: false, side: THREE.DoubleSide });
+    var mStrap = new THREE.MeshStandardMaterial({ color: 0xd8d2b8, roughness: 0.85 });
+    var mIvory = new THREE.MeshStandardMaterial({ color: 0xe8dcc0, roughness: 0.55 });
+    var mGold = new THREE.MeshStandardMaterial({ color: 0xd9b24a, roughness: 0.28, metalness: 0.88 });
+
+    var parts = [];
+    var floorY = Math.max(0.62, G.belt - 0.40);
+    var seatTop = floorY + 0.47;
+    var seatPersonY = seatTop - 0.80;      /* a mkPerson's origin when seated */
+    var W = HW * 2;
+
+    /* ================= 1. FLOOR, STEP WELLS, WHEEL ARCHES, CEILING ================= */
+    parts.push({ g: bx(W - 0.34, 0.05, Lg - 0.9, 0, floorY - 0.02, -0.1), m: mFloor });
+    parts.push({ g: bx(0.56, 0.012, Lg - 1.8, 0, floorY + 0.028, -0.3), m: mMat });
+    parts.push({ g: bx(W - 0.30, 0.035, Lg - 1.0, 0, G.roof - 0.30, -0.1), m: mCeil });
+    /* internal wheel-arch boxes */
+    [[G.wheelF, 1.45], [G.wheelR, 1.60]].forEach(function (wa) {
+      for (var sx = -1; sx <= 1; sx += 2) {
+        parts.push({ g: bx(0.52, 0.34, wa[1], sx * (HW - 0.28), floorY + 0.17, wa[0]), m: mTrim });
+      }
+    });
+    /* step wells under every doorway */
+    G.doors.forEach(function (d) {
+      var zc = (d[0] + d[1]) * 0.5, dw = d[1] - d[0];
+      parts.push({ g: bx(0.52, 0.06, dw, HW - 0.30, d[2] + 0.16, zc), m: mFrame });
+      parts.push({ g: bx(0.52, 0.14, 0.02, HW - 0.30, d[2] + 0.08, zc + dw * 0.5), m: mTrim });
+    });
+
+    /* ================= 2. SCULPTED 2+2 SEATING ================= */
+    var seats = [];
+    var inDoorway = function (z) {
+      for (var i = 0; i < G.doors.length; i++) {
+        if (z > G.doors[i][0] - 0.62 && z < G.doors[i][1] + 0.62) return true;
+      }
+      return false;
+    };
+    var zStart = G.doors[0][0] - 1.05;
+    for (var rz = zStart; rz > -L2g + 1.55; rz -= 0.86) {
+      if (inDoorway(rz)) continue;
+      [-0.96, -0.50, 0.50, 0.96].forEach(function (sx) {
+        var aisle = sx < 0 ? 1 : -1;
+        parts.push({ g: bx(0.44, 0.10, 0.44, sx, floorY + 0.42, rz), m: mSeat });          /* squab */
+        parts.push({ g: bx(0.44, 0.60, 0.09, sx, floorY + 0.75, rz - 0.20), m: mSeat2 });   /* backrest */
+        parts.push({ g: bx(0.30, 0.17, 0.09, sx, floorY + 1.13, rz - 0.20), m: mSeat2 });   /* headrest */
+        parts.push({ g: bx(0.05, 0.34, 0.05, sx + 0.17, floorY + 0.19, rz - 0.14), m: mDark });
+        parts.push({ g: bx(0.05, 0.34, 0.05, sx - 0.17, floorY + 0.19, rz - 0.14), m: mDark });
+        parts.push({ g: bx(0.045, 0.055, 0.40, sx + aisle * 0.235, floorY + 0.66, rz), m: mSeat2 });  /* armrest */
+        parts.push({ g: bx(0.032, 0.20, 0.032, sx + aisle * 0.20, floorY + 1.10, rz - 0.16), m: mFrame }); /* grab handle */
+        parts.push({ g: bx(0.30, 0.20, 0.012, sx, floorY + 0.60, rz - 0.27), m: mTrim });   /* magazine net */
+        seats.push([sx * s, rz * s, seatPersonY * s]);
+      });
+    }
+    /* the long bench right across the back */
+    var bz = -L2g + 1.18;
+    parts.push({ g: bx(W - 0.44, 0.10, 0.46, 0, floorY + 0.42, bz), m: mSeat });
+    parts.push({ g: bx(W - 0.44, 0.62, 0.09, 0, floorY + 0.76, bz - 0.22), m: mSeat2 });
+    [-0.96, -0.50, 0.0, 0.50, 0.96].forEach(function (sx) { seats.push([sx * s, bz * s, seatPersonY * s]); });
+
+    /* ================= 3. LUGGAGE RACKS / PARCEL SHELVES ================= */
+    if (isExpr || modelId === 'viking') {
+      for (var sx2 = -1; sx2 <= 1; sx2 += 2) {
+        parts.push({ g: bx(0.42, 0.05, Lg - 3.2, sx2 * (HW - 0.24), G.winTop + 0.10, -0.6), m: mTrim });
+        parts.push({ g: bx(0.03, 0.14, Lg - 3.2, sx2 * (HW - 0.42), G.winTop + 0.20, -0.6), m: mFrame });
+        for (var lz = -L2g + 2.2; lz < L2g - 2.0; lz += 1.6) {
+          parts.push({ g: bx(0.40, 0.11, 0.03, sx2 * (HW - 0.33), G.winTop + 0.19, lz), m: mFrame });
+        }
+      }
+    }
+
+    /* ================= 4. THE CAB / COCKPIT ================= */
+    var dX = (spec.eyePos ? spec.eyePos[0] : -0.46) / s;
+    var dashZ = L2g - 0.78;
+    /* sculpted wrap-around dashboard */
+    parts.push({ g: bx(W - 0.30, 0.44, 0.60, 0, floorY + 0.62, dashZ), m: mTrim });
+    parts.push({ g: bx(W - 0.34, 0.05, 0.56, 0, floorY + 0.86, dashZ - 0.02), m: mDark });
+    parts.push({ g: bx(1.05, 0.30, 0.16, dX, floorY + 1.02, dashZ - 0.26), m: mDark });       /* binnacle hood */
+    parts.push({ g: bx(0.62, 0.16, 0.10, dX + 0.62, floorY + 0.80, dashZ - 0.20), m: mDark }); /* centre stack */
+    /* instrument pod, switch bank, cup holder */
+    parts.push({ g: bx(0.44, 0.05, 0.06, dX + 0.62, floorY + 0.90, dashZ - 0.24), m: mDark });
+    for (var sw = 0; sw < 5; sw++) {
+      parts.push({ g: bx(0.045, 0.03, 0.02, dX + 0.40 + sw * 0.09, floorY + 0.92, dashZ - 0.245), m: mGold });
+    }
+    /* steering column, wheel, stalks & pedals */
+    parts.push({ g: cyl(0.035, 0.035, 0.44, 10, dX, floorY + 0.86, dashZ - 0.46, 0.62), m: mDark });
+    parts.push({ g: cyl(0.022, 0.022, 0.30, 8, dX - 0.16, floorY + 0.86, dashZ - 0.30, 0, 0, Math.PI * 0.5), m: mDark });
+    parts.push({ g: cyl(0.018, 0.018, 0.30, 8, dX + 0.16, floorY + 0.80, dashZ - 0.30, 0, 0, Math.PI * 0.5), m: mDark });
+    parts.push({ g: bx(0.07, 0.16, 0.04, dX - 0.20, floorY + 0.30, dashZ - 0.78), m: mFrame });
+    parts.push({ g: bx(0.07, 0.16, 0.04, dX + 0.06, floorY + 0.30, dashZ - 0.78), m: mFrame });
+    parts.push({ g: bx(0.10, 0.05, 0.14, dX + 0.30, floorY + 0.16, dashZ - 0.80), m: mFrame });
+    /* driver's seat (suspension base, squab, backrest, headrest, armrest) */
+    parts.push({ g: bx(0.46, 0.10, 0.46, dX, floorY + 0.44, dashZ - 0.92), m: mSeat });
+    parts.push({ g: bx(0.46, 0.66, 0.10, dX, floorY + 0.79, dashZ - 1.12), m: mSeat2 });
+    parts.push({ g: bx(0.32, 0.17, 0.10, dX, floorY + 1.19, dashZ - 1.12), m: mSeat2 });
+    parts.push({ g: bx(0.10, 0.10, 0.34, dX, floorY + 0.18, dashZ - 0.92), m: mDark });
+    parts.push({ g: bx(0.05, 0.06, 0.34, dX + 0.24, floorY + 0.66, dashZ - 0.98), m: mDark });
+    /* conductor's perch + ticket machine, engine cover beside the driver */
+    parts.push({ g: bx(0.44, 0.09, 0.42, HW - 0.52, floorY + 0.40, dashZ - 1.10), m: mSeat });
+    parts.push({ g: bx(0.44, 0.52, 0.09, HW - 0.52, floorY + 0.70, dashZ - 1.30), m: mSeat2 });
+    parts.push({ g: bx(0.52, 0.62, 0.90, HW - 0.48, floorY + 0.31, dashZ - 2.20), m: mTrim });
+    parts.push({ g: bx(0.30, 0.10, 0.34, HW - 0.48, floorY + 0.68, dashZ - 1.85), m: mDark });   /* ticket machine */
+    parts.push({ g: bx(0.22, 0.05, 0.20, HW - 0.48, floorY + 0.76, dashZ - 1.85), m: mIvory });
+    /* modesty screen behind the cab + sun visors + interior mirror */
+    parts.push({ g: bx(W - 0.36, 0.90, 0.05, 0, floorY + 1.10, dashZ - 1.72), m: mTrim });
+    parts.push({ g: bx(0.62, 0.16, 0.04, dX, G.winTop - 0.14, L2g - 0.66), m: mTrim });
+    parts.push({ g: bx(0.30, 0.11, 0.03, 0, G.winTop - 0.12, L2g - 0.62), m: mDark });
+    /* the little shrine on the dashboard, with garland */
+    parts.push({ g: bx(0.20, 0.05, 0.16, -dX - 0.05, floorY + 0.90, dashZ - 0.22), m: mGold });
+    parts.push({ g: new THREE.ConeGeometry(0.055, 0.16, 10).translate(-dX - 0.05, floorY + 1.01, dashZ - 0.22), m: mGold });
+    parts.push({ g: new THREE.SphereGeometry(0.042, 10, 8).translate(-dX - 0.05, floorY + 1.11, dashZ - 0.22), m: mGold });
+    /* fire extinguisher by the door */
+    parts.push({ g: cyl(0.065, 0.065, 0.34, 10, HW - 0.24, floorY + 0.19, G.doors[0][0] - 0.42), m: tailMat });
+
+    /* ================= 5. CEILING LIGHTING, AC VENTS, TV, SPEAKERS ================= */
+    var lights = [];
+    for (var lzz = -L2g + 2.0; lzz < L2g - 1.6; lzz += 2.1) {
+      parts.push({ g: bx(0.34, 0.035, 1.30, 0, G.roof - 0.34, lzz), m: cabinMat });
+      lights.push(lzz);
+    }
+    for (var vz = -L2g + 2.8; vz < L2g - 1.8; vz += 3.0) {
+      for (var vx = -1; vx <= 1; vx += 2) {
+        parts.push({ g: bx(0.26, 0.03, 0.42, vx * 0.62, G.roof - 0.32, vz), m: mTrim });
+      }
+    }
+    parts.push({ g: bx(0.78, 0.46, 0.07, 0, G.roof - 0.62, dashZ - 2.6), m: new THREE.MeshStandardMaterial({ color: 0x08090c, roughness: 0.18 }) });
+    parts.push({ g: bx(0.05, 0.12, 0.05, 0, G.roof - 0.36, dashZ - 2.6), m: mDark });
+    for (var sp2 = -1; sp2 <= 1; sp2 += 2) {
+      parts.push({ g: bx(0.30, 0.30, 0.18, sp2 * (HW - 0.20), G.roof - 0.52, -L2g + 2.0), m: mDark });
+      parts.push({ g: cyl(0.11, 0.11, 0.03, 12, sp2 * (HW - 0.20), G.roof - 0.52, -L2g + 1.90, Math.PI * 0.5), m: mTrim });
+    }
+
+    /* ================= 6. GRAB RAILS, STANCHIONS, HANGING STRAPS ================= */
+    [-0.34, 0.34].forEach(function (rx) {
+      parts.push({ g: cyl(0.021, 0.021, Lg - 2.4, 8, rx, G.roof - 0.44, -0.6, Math.PI * 0.5), m: mChrome });
+      for (var pz = -L2g + 2.2; pz < L2g - 2.4; pz += 1.55) {
+        parts.push({ g: cyl(0.018, 0.018, G.roof - 0.44 - floorY, 8, rx, (G.roof - 0.44 + floorY) * 0.5, pz), m: mChrome });
+        if (!inDoorway(pz)) {
+          parts.push({ g: bx(0.024, 0.19, 0.01, rx, G.roof - 0.63, pz), m: mStrap });
+          parts.push({ g: new THREE.TorusGeometry(0.045, 0.010, 6, 12).translate(rx, G.roof - 0.76, pz), m: mStrap });
+        }
+      }
+    });
+    /* the rail by the door where the conductor rides */
+    parts.push({ g: cyl(0.024, 0.024, 1.30, 8, HW - 0.30, floorY + 0.66, (G.doors[0][0] + G.doors[0][1]) * 0.5), m: mChrome });
+    parts.push({ g: cyl(0.022, 0.022, 0.56, 8, HW - 0.46, floorY + 1.30, (G.doors[0][0] + G.doors[0][1]) * 0.5 - 0.28, 0, 0, Math.PI * 0.5), m: mChrome });
+
+    /* ================= 7. EXTERIOR LIGHTS & CHROME FURNITURE ================= */
+    var yNose = G.yBot + 0.52, yTail = G.yBot + 0.66;
+    parts.push({ g: bx(W - 0.20, 0.30, 0.10, 0, G.yBot + 0.20, L2g - 0.16), m: mDark });
+    parts.push({ g: bx(W - 0.34, 0.09, 0.06, 0, yNose - 0.20, L2g - 0.05), m: mChrome });
+    for (var sl2 = 0; sl2 < (isElec ? 2 : 4); sl2++) {
+      parts.push({ g: bx(1.30, 0.032, 0.05, 0, G.yBot + 0.30 + sl2 * 0.11, L2g - 0.02), m: mChrome });
+    }
+    for (var sd = -1; sd <= 1; sd += 2) {
+      /* projector headlamp cluster, DRL brow, corner indicator & fog lamp */
+      parts.push({ g: bx(0.44, 0.22, 0.08, sd * (HW - 0.32), yNose + 0.10, L2g - 0.14), m: mDark });
+      parts.push({ g: cyl(0.070, 0.070, 0.06, 14, sd * (HW - 0.26), yNose + 0.11, L2g - 0.09, Math.PI * 0.5), m: hlMat });
+      parts.push({ g: cyl(0.056, 0.056, 0.06, 14, sd * (HW - 0.44), yNose + 0.11, L2g - 0.09, Math.PI * 0.5), m: hlMat });
+      parts.push({ g: bx(0.42, 0.032, 0.06, sd * (HW - 0.33), yNose + 0.24, L2g - 0.06), m: drlMat });
+      parts.push({ g: bx(0.09, 0.15, 0.12, sd * (HW - 0.05), yNose + 0.06, L2g - 0.30), m: sd > 0 ? blinkLMat : blinkRMat });
+      parts.push({ g: cyl(0.062, 0.062, 0.05, 12, sd * (HW - 0.36), G.yBot + 0.24, L2g - 0.05, Math.PI * 0.5), m: fogMat });
+      /* vertical tail-light stack, reverse lamp & rear indicator */
+      parts.push({ g: bx(0.20, 0.72, 0.07, sd * (HW - 0.17), yTail + 0.38, -L2g + 0.02), m: tailMat });
+      parts.push({ g: bx(0.14, 0.16, 0.07, sd * (HW - 0.17), yTail - 0.06, -L2g + 0.02), m: sd > 0 ? blinkLMat : blinkRMat });
+      parts.push({ g: bx(0.13, 0.10, 0.06, sd * (HW - 0.44), yTail - 0.20, -L2g + 0.02), m: cabinMat });
+      /* roof corner marker lights */
+      parts.push({ g: bx(0.15, 0.07, 0.07, sd * (HW - 0.18), G.roof - 0.06, L2g - 1.10), m: drlMat });
+      parts.push({ g: bx(0.15, 0.07, 0.07, sd * (HW - 0.18), G.roof - 0.06, -L2g + 0.14), m: tailMat });
+      /* long armoured wing mirrors */
+      parts.push({ g: bx(0.24, 0.045, 0.05, sd * (HW + 0.12), G.winTop - 0.30, L2g - 0.95), m: mDark });
+      parts.push({ g: bx(0.055, 0.045, 0.40, sd * (HW + 0.26), G.winTop - 0.42, L2g - 0.78), m: mDark });
+      parts.push({ g: bx(0.12, 0.36, 0.15, sd * (HW + 0.28), G.winTop - 0.56, L2g - 0.62), m: mTrim });
+      parts.push({ g: bx(0.095, 0.30, 0.02, sd * (HW + 0.285), G.winTop - 0.56, L2g - 0.70), m: mChrome });
+    }
+    /* windscreen wipers are separate animated groups (see below) */
+
+    mergeParts(body, parts, true);
+
+    /* ================= 8. SIDE LIVERY SIGNBOARDS & LED DESTINATION DISPLAY ================= */
+    var sideTex = createSideTexture(modelId, liv, routeObj);
+    var mSidePanel = new THREE.MeshStandardMaterial({ map: sideTex, roughness: 0.30, metalness: 0.28, envMapIntensity: 1.2 });
+    for (var sg2 = -1; sg2 <= 1; sg2 += 2) {
+      var pg = new THREE.PlaneGeometry(Lg * 0.52, 0.62);
+      pg.rotateY(sg2 > 0 ? Math.PI * 0.5 : -Math.PI * 0.5);
+      pg.translate(sg2 * (HW + 0.014), floorY + 0.52, -0.5);
+      var pm = new THREE.Mesh(pg, mSidePanel);
+      body.add(pm);
+    }
+
+    var led = createLedMatrix((routeObj && routeObj.num) || '138',
+      (routeObj && routeObj.shortName ? routeObj.shortName.toUpperCase() : 'WORLD TRANSIT'), liv.accent);
+    var ledMat = new THREE.MeshBasicMaterial({ map: led.tex });
+    var fLed = new THREE.Mesh(new THREE.PlaneGeometry(1.80, 0.30), ledMat);
+    fLed.position.set(0, G.winTop - 0.16, L2g - 0.34);
+    fLed.rotation.x = -0.16;
+    body.add(fLed);
+    var sLed = new THREE.Mesh(new THREE.PlaneGeometry(1.10, 0.20), ledMat);
+    sLed.position.set(HW + 0.02, G.belt + 0.22, G.wheelF - 0.55);
+    sLed.rotation.y = Math.PI * 0.5;
+    body.add(sLed);
+    /* rear destination blind */
+    var rLed = new THREE.Mesh(new THREE.PlaneGeometry(1.20, 0.22), ledMat);
+    rLed.position.set(0, G.winTop - 0.20, -L2g - 0.02);
+    rLed.rotation.y = Math.PI;
+    body.add(rLed);
+
+    /* ================= 9. LIVE GLASS COCKPIT MFD + STEERING WHEEL ================= */
+    var mfd = createCockpitMFD(spec);
+    var mfdMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.50, 0.25), new THREE.MeshBasicMaterial({ map: mfd.tex }));
+    mfdMesh.position.set(dX, floorY + 1.00, dashZ - 0.20);
+    mfdMesh.rotation.order = 'YXZ';
+    mfdMesh.rotation.y = Math.PI;
+    mfdMesh.rotation.x = -0.50;
+    body.add(mfdMesh);
+
+    var wheelMesh = new THREE.Mesh(new THREE.TorusGeometry(0.21, 0.026, 10, 22), mDark);
+    wheelMesh.position.set(dX, floorY + 0.96, dashZ - 0.66);
+    wheelMesh.rotation.x = -0.72;
+    body.add(wheelMesh);
+    for (var k2 = 0; k2 < 3; k2++) {
+      var spk = new THREE.Mesh(bx(0.19, 0.022, 0.02, 0, -0.13, 0), mDark);
+      spk.rotation.z = k2 * 2.094;
+      wheelMesh.add(spk);
+    }
+
+    /* ================= 10. ANIMATED PNEUMATIC PLUG DOORS ================= */
+    var doors = [];
+    G.doors.forEach(function (d) {
+      var dw = d[1] - d[0], zc = (d[0] + d[1]) * 0.5, dh = d[3] - d[2];
+      var leafW = dw * 0.5 - 0.02;
+      for (var h = 0; h < 2; h++) {
+        var dz = h === 0 ? d[0] - dw * 0.25 : d[1] + dw * 0.25;
+        var grp = new THREE.Group();
+        grp.position.set(HW - 0.16, 0, dz);
+        var frame = new THREE.Mesh(bx(0.045, dh, leafW, 0, (d[2] + d[3]) * 0.5, 0), mTrim);
+        var glass = new THREE.Mesh(bx(0.05, dh * 0.62, leafW * 0.80, 0.006, d[2] + dh * 0.66, 0), mGlass2);
+        var bar = new THREE.Mesh(bx(0.05, 0.05, leafW * 0.9, -0.02, d[2] + 0.30, 0), mChrome);
+        grp.add(frame, glass, bar);
+        body.add(grp);
+        doors.push({ grp: grp, baseX: HW - 0.16, baseZ: dz, slideZ: (h === 0 ? -1 : 1) * dw * 0.5, slideX: 0.10, amt: 0 });
+      }
+      /* door-top illuminated "open" tell-tale */
+      var tt = new THREE.Mesh(bx(0.10, 0.05, dw, HW - 0.06, d[3] + 0.10, zc), cabinMat);
+      body.add(tt);
+      doors.tellTale = tt;
+    });
+
+    /* ================= 11. PANTOGRAPH WIPERS ================= */
+    var wipers = [];
+    for (var wx2 = -0.55; wx2 <= 0.56; wx2 += 1.10) {
+      var piv = new THREE.Group();
+      piv.position.set(wx2, G.belt + 0.05, L2g - 0.42);
+      piv.rotation.x = -Math.atan2(G.rake, G.winTop - G.belt);
+      var arm = new THREE.Mesh(bx(0.028, 0.74, 0.028, 0, 0.37, 0.03), mDark);
+      var blade = new THREE.Mesh(bx(0.018, 0.60, 0.036, 0.02, 0.54, 0.04), mDark);
+      piv.add(arm, blade);
+      body.add(piv);
+      wipers.push(piv);
+    }
+
+    /* ================= 12. WHEEL ASSEMBLIES (unscaled, on the root) ================= */
+    var wheels = [];
+    var calColor = isElec ? 0x06b6d4 : isExpr ? 0xdc2626 : 0xf59e0b;
+    var xW = spec.widthM * 0.5 - 0.17;
+    [
+      { x: xW, z: spec.wheelF, steer: true, dual: false },
+      { x: -xW, z: spec.wheelF, steer: true, dual: false },
+      { x: xW - 0.03, z: spec.wheelR, steer: false, dual: true },
+      { x: -xW + 0.03, z: spec.wheelR, steer: false, dual: true }
+    ].forEach(function (pos) {
+      var w = buildCoachWheel(spec.wheelR_m, pos.steer, pos.dual, calColor);
+      w.group.position.set(pos.x, spec.wheelR_m, pos.z);
+      root.add(w.group);
+      wheels.push(w);
+    });
+
+    return {
+      root: root, tilt: tilt, cfg: cfg, spec: spec, wheels: wheels, doors: doors, wipers: wipers,
+      hlMat: hlMat, tailMat: tailMat, fogMat: fogMat, blinkLMat: blinkLMat, blinkRMat: blinkRMat,
+      markA: blinkLMat, markR: tailMat, wheelMesh: wheelMesh, cabinMat: cabinMat,
+      paint: paintMeshes,
+      seats: seats,
+      floorY: floorY * s,
+      driverPos: [dX * s, seatPersonY * s, (dashZ - 0.92) * s],
+      stepPos: [(HW - 0.30) * s, (floorY + 0.10) * s, ((G.doors[0][0] + G.doors[0][1]) * 0.5) * s],
+      ledTex: led.tex,
+      updateLED: led.update,
+      updateMFD: mfd.update
+    };
+  }
+
   function enhanceViking(b) {
     if (!b || !b.tilt) return b;
     // Mount dual chrome air-horn trumpets & crisp roof beacon accents on Viking without changing camera eye
@@ -725,6 +1121,13 @@
   }
 
   function buildBus(modelId, cfg, routeObj, fallbackMakeBus) {
+    /* real 3D glTF coach shells when the asset pack has finished loading */
+    if (global.WORLD_MODELS && global.WORLD_MODELS.ready() && COACH_GEO[modelId]) {
+      try {
+        const b = buildGLBCoach(modelId, cfg, routeObj);
+        if (b) return b;
+      } catch (e) { /* fall through to the procedural coach */ }
+    }
     if (modelId === 'viking' || !CATALOG[modelId]) {
       const b = fallbackMakeBus ? fallbackMakeBus(cfg) : buildMonocoqueBus('metro', cfg, routeObj);
       b.spec = CATALOG.viking;
@@ -766,6 +1169,159 @@
     }
   }
 
+
+  /* ==========================================================================
+     RIVAL / AI COACH — the same photoreal glTF monocoque shell in the eight
+     private-operator liveries that run the corridors alongside the player.
+     ========================================================================== */
+  var AI_LIVERY = [
+    { paint: 0x6a2f86, accent: 0xf4b24c, roof: 0xe6e2f2, name: 'MIHIRI', led: '#f4b24c' },
+    { paint: 0x175a3a, accent: 0xe5c14c, roof: 0xe0eee6, name: 'ROYAL', led: '#8fd0a8' },
+    { paint: 0x0d3a7a, accent: 0x59b6ff, roof: 0xdde8f4, name: 'SAMUDRA', led: '#4aa0e6' },
+    { paint: 0x9a1b1b, accent: 0xffb347, roof: 0xf0e2d8, name: 'LANKA', led: '#e86a4c' },
+    { paint: 0x0e6b6b, accent: 0x52c7c0, roof: 0xd8ecea, name: 'SITHARA', led: '#52c7c0' },
+    { paint: 0x1c1c22, accent: 0xc9a23a, roof: 0xe6dfc8, name: 'RAJAH', led: '#c9a23a' },
+    { paint: 0xd6337a, accent: 0xf7a8c8, roof: 0xf4dde8, name: 'NILMINI', led: '#f7a8c8' },
+    { paint: 0x2d7a12, accent: 0xb6e04a, roof: 0xe2efd6, name: 'DILSHAN', led: '#b6e04a' }
+  ];
+
+  function buildAICoach(kind, col, opts) {
+    var WM = global.WORLD_MODELS;
+    if (!WM || !WM.ready()) return null;
+    var shell = WM.coachShell('ai');
+    if (!shell) return null;
+    opts = opts || {};
+    var G = COACH_GEO.ai;
+    var Lg = WM.busLength.ai, L2g = Lg * 0.5, HW = G.hw;
+    var v = AI_LIVERY[((opts.variantIdx || 0) % AI_LIVERY.length + AI_LIVERY.length) % AI_LIVERY.length];
+    var isExp = !!opts.isExpress;
+
+    var root = new THREE.Group();
+    var body = new THREE.Group();
+    root.add(body);
+    body.add(shell);
+
+    /* livery straight onto the glTF meshes */
+    WM.meshesNamed(shell, ['PaintShell']).forEach(function (m) {
+      m.material.color.setHex(col !== undefined && col !== null ? col : v.paint);
+      m.material.metalness = 0.42; m.material.roughness = 0.20; m.material.envMapIntensity = 1.4;
+      m.material.needsUpdate = true;
+    });
+    WM.meshesNamed(shell, ['AccentShell']).forEach(function (m) {
+      m.material.color.setHex(v.accent); m.material.metalness = 0.38; m.material.roughness = 0.24;
+      m.material.needsUpdate = true;
+    });
+    WM.meshesNamed(shell, ['RoofPod']).forEach(function (m) {
+      m.material.color.setHex(v.roof); m.material.needsUpdate = true;
+    });
+    var gm = WM.meshesNamed(shell, ['CabinGlass'])[0];
+    if (gm) {
+      gm.material.transparent = true; gm.material.opacity = 0.52;
+      gm.material.roughness = 0.06; gm.material.side = THREE.DoubleSide;
+      gm.material.needsUpdate = true;
+    }
+
+    var hlMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xfff3cc, emissiveIntensity: 0.7, roughness: 0.10 });
+    var tailMat = new THREE.MeshStandardMaterial({ color: 0xef4444, emissive: 0xdc2626, emissiveIntensity: 0.5, roughness: 0.18 });
+    var blinkLMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.12 });
+    var blinkRMat = new THREE.MeshStandardMaterial({ color: 0xf59e0b, emissive: 0xf59e0b, emissiveIntensity: 0.12 });
+    var mDark = new THREE.MeshStandardMaterial({ color: 0x14181f, roughness: 0.62, metalness: 0.22 });
+    var mChrome = new THREE.MeshStandardMaterial({ color: 0xdfe6ef, roughness: 0.15, metalness: 0.92, envMapIntensity: 1.6 });
+    var mFloor = new THREE.MeshStandardMaterial({ color: 0x3a3f49, roughness: 0.92 });
+    var mSeat = new THREE.MeshStandardMaterial({ color: 0x1d4ed8, roughness: 0.70 });
+    var mSeat2 = new THREE.MeshStandardMaterial({ color: 0x163690, roughness: 0.74 });
+    var mTrim = new THREE.MeshStandardMaterial({ color: 0x2b3037, roughness: 0.74, metalness: 0.16 });
+    var mGlass = new THREE.MeshPhysicalMaterial({ color: 0x9fd8ff, roughness: 0.06, metalness: 0.10, transparent: true, opacity: 0.26, depthWrite: false, side: THREE.DoubleSide });
+
+    var parts = [];
+    var floorY = G.belt - 0.40, W = HW * 2;
+
+    /* a lighter interior: floor, ceiling, 2+2 seating, cab, rails */
+    parts.push({ g: bx(W - 0.34, 0.05, Lg - 0.9, 0, floorY - 0.02, -0.1), m: mFloor });
+    parts.push({ g: bx(W - 0.30, 0.035, Lg - 1.0, 0, G.roof - 0.30, -0.1), m: mTrim });
+    var dzw = G.doors[0];
+    var inDoor = function (z) { return z > dzw[0] - 0.62 && z < dzw[1] + 0.62; };
+    for (var rz = dzw[0] - 1.0; rz > -L2g + 1.5; rz -= 0.92) {
+      if (inDoor(rz)) continue;
+      [-0.94, -0.48, 0.48, 0.94].forEach(function (sx) {
+        parts.push({ g: bx(0.42, 0.09, 0.42, sx, floorY + 0.42, rz), m: mSeat });
+        parts.push({ g: bx(0.42, 0.58, 0.08, sx, floorY + 0.74, rz - 0.19), m: mSeat2 });
+      });
+    }
+    parts.push({ g: bx(W - 0.44, 0.09, 0.44, 0, floorY + 0.42, -L2g + 1.16), m: mSeat });
+    parts.push({ g: bx(W - 0.44, 0.60, 0.08, 0, floorY + 0.74, -L2g + 0.95), m: mSeat2 });
+    /* cab */
+    var dX = -0.46, dashZ = L2g - 0.80;
+    parts.push({ g: bx(W - 0.32, 0.42, 0.56, 0, floorY + 0.60, dashZ), m: mTrim });
+    parts.push({ g: bx(0.46, 0.09, 0.44, dX, floorY + 0.43, dashZ - 0.88), m: mSeat });
+    parts.push({ g: bx(0.46, 0.62, 0.09, dX, floorY + 0.76, dashZ - 1.06), m: mSeat2 });
+    parts.push({ g: bx(W - 0.36, 0.86, 0.05, 0, floorY + 1.05, dashZ - 1.62), m: mTrim });
+    /* grab rails */
+    [-0.34, 0.34].forEach(function (rx) {
+      parts.push({ g: cyl(0.02, 0.02, Lg - 2.6, 6, rx, G.roof - 0.46, -0.6, Math.PI * 0.5), m: mChrome });
+    });
+    /* lights & chrome furniture */
+    var yN = G.yBot + 0.52, yT = G.yBot + 0.66;
+    parts.push({ g: bx(W - 0.24, 0.28, 0.09, 0, G.yBot + 0.20, L2g - 0.16), m: mDark });
+    parts.push({ g: bx(W - 0.38, 0.08, 0.06, 0, yN - 0.18, L2g - 0.05), m: mChrome });
+    for (var sd = -1; sd <= 1; sd += 2) {
+      parts.push({ g: bx(0.42, 0.21, 0.08, sd * (HW - 0.32), yN + 0.08, L2g - 0.14), m: mDark });
+      parts.push({ g: cyl(0.068, 0.068, 0.055, 12, sd * (HW - 0.27), yN + 0.09, L2g - 0.09, Math.PI * 0.5), m: hlMat });
+      parts.push({ g: cyl(0.052, 0.052, 0.055, 12, sd * (HW - 0.43), yN + 0.09, L2g - 0.09, Math.PI * 0.5), m: hlMat });
+      parts.push({ g: bx(0.09, 0.14, 0.11, sd * (HW - 0.05), yN + 0.05, L2g - 0.28), m: sd > 0 ? blinkLMat : blinkRMat });
+      parts.push({ g: bx(0.19, 0.68, 0.07, sd * (HW - 0.17), yT + 0.36, -L2g + 0.02), m: tailMat });
+      parts.push({ g: bx(0.13, 0.15, 0.07, sd * (HW - 0.17), yT - 0.06, -L2g + 0.02), m: sd > 0 ? blinkLMat : blinkRMat });
+      parts.push({ g: bx(0.14, 0.07, 0.07, sd * (HW - 0.18), G.roof - 0.06, L2g - 1.05), m: hlMat });
+      parts.push({ g: bx(0.14, 0.07, 0.07, sd * (HW - 0.18), G.roof - 0.06, -L2g + 0.14), m: tailMat });
+      parts.push({ g: bx(0.22, 0.34, 0.14, sd * (HW + 0.26), G.winTop - 0.54, L2g - 0.60), m: mTrim });
+      parts.push({ g: bx(0.05, 0.04, 0.34, sd * (HW + 0.13), G.winTop - 0.42, L2g - 0.76), m: mDark });
+    }
+    mergeParts(body, parts, true);
+
+    /* plug doors + destination blinds */
+    var dw = dzw[1] - dzw[0], dh = dzw[3] - dzw[2];
+    for (var h = 0; h < 2; h++) {
+      var grp = new THREE.Group();
+      grp.position.set(HW - 0.14, 0, h === 0 ? dzw[0] - dw * 0.25 : dzw[1] + dw * 0.25);
+      grp.add(new THREE.Mesh(bx(0.04, dh, dw * 0.5 - 0.02, 0, (dzw[2] + dzw[3]) * 0.5, 0), mTrim));
+      grp.add(new THREE.Mesh(bx(0.05, dh * 0.60, dw * 0.38, 0.006, dzw[2] + dh * 0.66, 0), mGlass));
+      body.add(grp);
+    }
+
+    var rInfo = opts.routeObj || {};
+    var led = createLedMatrix(rInfo.num || '138', (v.name + '  ' + (rInfo.shortName || '')).slice(0, 24), v.led);
+    var ledMat = new THREE.MeshBasicMaterial({ map: led.tex });
+    var fLed = new THREE.Mesh(new THREE.PlaneGeometry(1.70, 0.28), ledMat);
+    fLed.position.set(0, G.winTop - 0.15, L2g - 0.32);
+    fLed.rotation.x = -0.15;
+    body.add(fLed);
+    var sLed = new THREE.Mesh(new THREE.PlaneGeometry(1.05, 0.19), ledMat);
+    sLed.position.set(HW + 0.02, G.belt + 0.20, G.wheelF - 0.55);
+    sLed.rotation.y = Math.PI * 0.5;
+    body.add(sLed);
+    var rLed = new THREE.Mesh(new THREE.PlaneGeometry(1.10, 0.21), ledMat);
+    rLed.position.set(0, G.winTop - 0.19, -L2g - 0.02);
+    rLed.rotation.y = Math.PI;
+    body.add(rLed);
+
+    /* wheels — real 3D alloy rims, mounted on the root so they stay true size */
+    var wheels = [];
+    var wr = 0.52;
+    [[HW - 0.16, G.wheelF, false], [-HW + 0.16, G.wheelF, false],
+     [HW - 0.20, G.wheelR, true], [-HW + 0.20, G.wheelR, true]].forEach(function (wp) {
+      var w = buildCoachWheel(wr, false, wp[2], isExp ? 0xdc2626 : 0xf59e0b);
+      w.group.position.set(wp[0], wr, wp[1]);
+      root.add(w.group);
+      wheels.push(w);
+    });
+
+    root.userData = {
+      wheels: wheels, hlMat: hlMat, tailMat: tailMat,
+      blinkLMat: blinkLMat, blinkRMat: blinkRMat, policeBeacons: null
+    };
+    return root;
+  }
+
   // ===================== TRAFFIC VEHICLE ENGINE =====================
 
   function makeAiWheel(r, w) {
@@ -792,6 +1348,20 @@
   let aiStyleIdx = 0;
   function buildTrafficVehicle(kind, col, opts) {
     opts = opts || {};
+    /* photoreal glTF rival coach for the AI buses on the road */
+    if (/bus|coach|_ai/i.test(kind) && global.WORLD_MODELS && global.WORLD_MODELS.ready()) {
+      try {
+        const bc = buildAICoach(kind, col, opts);
+        if (bc) return bc;
+      } catch (e) { /* fall through to the procedural coach */ }
+    }
+    /* photoreal glTF traffic vehicle when the asset pack is loaded */
+    if (global.WORLD_MODELS && global.WORLD_MODELS.ready()) {
+      try {
+        const gv = global.WORLD_MODELS.buildTrafficVehicle(kind, col, opts);
+        if (gv) return gv;
+      } catch (e) { /* fall through to the procedural vehicle */ }
+    }
     const root = new THREE.Group();
     const parts = [];
     const wheels = [];
@@ -1044,6 +1614,10 @@
 
   global.BUS_MODELS = {
     catalog: CATALOG,
+    coachGeo: COACH_GEO,
+    buildGLBCoach,
+    buildAICoach,
+    AI_LIVERY,
     buildBus,
     animateBusExtras,
     buildTrafficVehicle,

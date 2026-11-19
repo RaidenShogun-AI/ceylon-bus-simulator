@@ -713,6 +713,8 @@ window.FIREBASE_CONFIG = {
 };
 </script>
 <script src="js/vendor/three.min.js"></script>
+<script src="js/vendor/GLTFLoader.js"></script>
+<script src="js/world-models.js"></script>
 <script>LD(24,"Loading routes &amp; GPS data\u2026")</script>
 <script src="js/route-paths.js"></script>
 <script src="js/routes-data.js"></script>
@@ -2601,20 +2603,30 @@ function board(tex,w,h,x,y,z,yaw,dbl){
 }
 
 /* ---- scenery "kit": thousands of simple coloured shapes drawn as a handful of instanced meshes ---- */
-const PR={box:[],cyl:[],sph:[],cone:[],prism:[]};
+const PR={box:[],cyl:[],sph:[],cone:[],prism:[],wall:[],wallS:[],wallT:[],roof:[]};
 function prim(t,x,y,z,sx,sy,sz,col,ry,rx,rz){PR[t].push([x,y,z,sx,sy,sz,col,ry||0,rx||0,rz||0]);}
 function kit(x,y,z,yaw){
   const c=Math.cos(yaw),s=Math.sin(yaw),P=t=>(lx,ly,lz,sx,sy,sz,col,ry,rx,rz)=>prim(t,x+lx*c+lz*s,y+ly,z-lx*s+lz*c,sx,sy,sz,col,(ry||0)+yaw,rx,rz);
-  return {box:P('box'),cyl:P('cyl'),sph:P('sph'),cone:P('cone'),prism:P('prism'),w:(lx,lz)=>[x+lx*c+lz*s,z-lx*s+lz*c],x,y,z,yaw};
+  return {box:P('box'),cyl:P('cyl'),sph:P('sph'),cone:P('cone'),prism:P('prism'),wall:P('wall'),wallS:P('wallS'),wallT:P('wallT'),roof:P('roof'),w:(lx,lz)=>[x+lx*c+lz*s,z-lx*s+lz*c],x,y,z,yaw};
 }
 function flushPrims(){
   const ps=new THREE.Shape();ps.moveTo(-.5,0);ps.lineTo(.5,0);ps.lineTo(0,1);ps.closePath();
+  /* a textured wall box tiles the PBR facade twice across, once-and-a-half up */
+  const wallGeo=(function(){const g=new THREE.BoxGeometry(1,1,1),uv=g.attributes.uv;
+    for(let i=0;i<uv.count;i++)uv.setXY(i,uv.getX(i)*2,uv.getY(i)*1.6);return g;})();
   const geo={box:new THREE.BoxGeometry(1,1,1),cyl:new THREE.CylinderGeometry(.5,.5,1,10),sph:new THREE.SphereGeometry(.5,10,8),cone:new THREE.ConeGeometry(.5,1,10),
-    prism:new THREE.ExtrudeGeometry(ps,{depth:1,bevelEnabled:false}).translate(0,0,-.5)};
+    prism:new THREE.ExtrudeGeometry(ps,{depth:1,bevelEnabled:false}).translate(0,0,-.5),
+    wall:wallGeo,wallS:wallGeo,wallT:wallGeo,roof:new THREE.ExtrudeGeometry(ps,{depth:1,bevelEnabled:false}).translate(0,0,-.5)};
   const M4=new THREE.Matrix4(),q=new THREE.Quaternion(),e=new THREE.Euler(),S=new THREE.Vector3(),P=new THREE.Vector3(),C=new THREE.Color();
+  const WM0=window.WORLD_MODELS;
+  const PRTEX={wall:WM0&&WM0.tex('house'),roof:WM0&&WM0.tex('roof'),tower:WM0&&WM0.tex('tower'),shop:WM0&&WM0.tex('shop')};
+  const plainMat=new THREE.MeshStandardMaterial({roughness:.85,metalness:.05});
+  const texMat={};
   Object.keys(PR).forEach(t=>{
     if(!PR[t].length)return;
-    const mat=new THREE.MeshStandardMaterial({roughness:.85,metalness:.05});
+    let mat=plainMat;
+    const tk=PRTEX[t]?t:null;
+    if(tk){ if(!texMat[tk])texMat[tk]=new THREE.MeshStandardMaterial({map:PRTEX[tk],roughness:.93,metalness:.03}); mat=texMat[tk]; }
     chunked(PR[t],L=>{
       const m=new THREE.InstancedMesh(geo[t],mat,L.length);
       L.forEach((a,i)=>{e.set(a[8],a[7],a[9],'YXZ');q.setFromEuler(e);S.set(a[3],a[4],a[5]);P.set(a[0],a[1],a[2]);M4.compose(P,q,S);m.setMatrixAt(i,M4);C.set(a[6]).convertSRGBToLinear();m.setColorAt(i,C);});
@@ -2631,6 +2643,15 @@ function chunked(items,build){
   cells.forEach(L=>{
     let cx=0,cz=0,r=0;L.forEach(a=>{cx+=a[0];cz+=a[2];});cx/=L.length;cz/=L.length;L.forEach(a=>{r=Math.max(r,Math.hypot(a[0]-cx,a[2]-cz));});
     const m=build(L);m.frustumCulled=false;CHUNKS.push({m,x:cx,z:cz,r:r+40});
+  });
+}
+function instSetM(geo,mats,items,shadow){   // same as instSet but with a material array (one per geometry group)
+  if(!items.length||!geo||!mats||!mats.length)return null;
+  const M4=new THREE.Matrix4(),q=new THREE.Quaternion(),e=new THREE.Euler(),S=new THREE.Vector3(),P=new THREE.Vector3();
+  chunked(items,L=>{
+    const m=new THREE.InstancedMesh(geo,Array.isArray(mats)&&mats.length>1?mats:mats[0],L.length);
+    L.forEach((a,i)=>{e.set(a[8]||0,a[6]||0,0,'YXZ');q.setFromEuler(e);S.set(a[3],a[4],a[5]);P.set(a[0],a[1],a[2]);M4.compose(P,q,S);m.setMatrixAt(i,M4);});
+    m.castShadow=!!shadow;m.receiveShadow=true;scene.add(m);return m;
   });
 }
 function instSet(geo,mat,items,shadow){   // items: [x,y,z,sx,sy,sz,ry,colour?,rx?]
@@ -2730,7 +2751,7 @@ function houseK(x,z,yaw,wall){
   if(roadDist(x,z)<ROAD_HW+7.5)return;
   if(!freeSpot(x,z,6))return;
   const y=terrainH(x,z);if(y<-.2)return;const K=kit(x,y,z,yaw);
-  K.box(0,1.1,0,6.6,3.6,5.2,wall);K.prism(0,2.9,0,8.2,2.1,6.2,0x9b4a2d);K.box(0,2.62,3.6,7.4,.14,2.4,0x9b4a2d,0,.08);
+  K.wall(0,1.1,0,6.6,3.6,5.2,wall);K.roof(0,2.9,0,8.2,2.1,6.2,0x9b4a2d);K.box(0,2.62,3.6,7.4,.14,2.4,0x9b4a2d,0,.08);
   K.cyl(-3,1.3,4.6,.24,2.6,.24,0xf2efe6);K.cyl(3,1.3,4.6,.24,2.6,.24,0xf2efe6);
   K.box(0,.8,2.64,.9,1.5,.12,0x2b241e);K.box(-2.2,1.6,2.64,1,1,.12,0x2b241e);K.box(2.2,1.6,2.64,1,1,.12,0x2b241e);K.box(0,.4,6.8,10,.8,.25,0xf2efe6);
   circles.push([x,z,4.2]);
@@ -2738,7 +2759,7 @@ function houseK(x,z,yaw,wall){
 function shopK(i,s,off,sign,two){
   const q=sidePos(i,s,off);if(!freeSpot(q.x,q.z,4))return null;
   const yaw=faceRoad(i,s,q.x,q.z),y=PATH[((i%PLEN)+PLEN)%PLEN].y,K=kit(q.x,y,q.z,yaw),h=two?6.4:3.4,w=7.2;
-  K.box(0,h/2-.7,0,w,h+1.4,6.4,pick(WALLS));K.box(0,h+.1,0,w+.3,.22,6.8,two?0x8d8a82:0x7d8288);
+  K.wallS(0,h/2-.7,0,w,h+1.4,6.4,pick(WALLS));K.box(0,h+.1,0,w+.3,.22,6.8,two?0x8d8a82:0x7d8288);
   K.box(0,1.25,3.22,w-1.2,2.5,.12,0x1c1a18);
   for(let g2=0;g2<4;g2++)K.box(-2.2+g2*1.45,.55,3.6,1.1,.9,.7,pick(BRIGHT));
   K.box(0,2.95,4.1,w,.08,2.0,pick(BRIGHT),0,.22);
@@ -2774,6 +2795,9 @@ const elephantDraw=g=>{g.fillStyle='#111';g.beginPath();g.ellipse(60,66,26,17,0,
 const kidsDraw=g=>{g.fillStyle='#111';[[52,0],[76,6]].forEach(p=>{g.beginPath();g.arc(p[0],42+p[1],7,0,TAU);g.fill();g.fillRect(p[0]-6,50+p[1],12,24);g.fillRect(p[0]-7,74+p[1],5,16);g.fillRect(p[0]+2,74+p[1],5,16);});};
 
 function elephant(scale){
+  if(window.WORLD_MODELS&&window.WORLD_MODELS.ready()){
+    try{const gv=window.WORLD_MODELS.elephant(scale);if(gv)return gv;}catch(e){}
+  }
   const g=new THREE.Group(),m=elephant.m||(elephant.m=new THREE.MeshStandardMaterial({color:0x6f6a66,roughness:.95})),iv=elephant.iv||(elephant.iv=new THREE.MeshStandardMaterial({color:0xf4eede,roughness:.5}));
   const add=(geo,mat,x,y,z,rx)=>{const o=new THREE.Mesh(geo,mat);o.position.set(x,y,z);if(rx)o.rotation.x=rx;o.castShadow=true;g.add(o);return o;};
   const S=elephant.s||(elephant.s=new THREE.SphereGeometry(1,14,10));
@@ -2830,7 +2854,7 @@ function shopRow(i0,i1,side,signs,pTwo,pSkip){
 function tower(i,s,off,w,d,h,col){
   const q=sidePos(i,s,off);if(roadDist(q.x,q.z)<off-3)return;const y=terrainH(q.x,q.z);if(y<.3||!freeSpot(q.x,q.z,Math.max(w,d)*.55))return;
   const K=kit(q.x,y,q.z,faceRoad(i,s,q.x,q.z));
-  K.box(0,h/2-1,0,w,h+2,d,col);K.box(0,h+.25,0,w+.4,.5,d+.4,0x8a8d92);
+  K.wallT(0,h/2-1,0,w,h+2,d,col);K.box(0,h+.25,0,w+.4,.5,d+.4,0x8a8d92);
   const fl=Math.max(2,Math.round(h/3.4)),fh=(h-2)/fl;for(let f=0;f<fl;f++){K.box(0,2+f*fh,d/2+.03,w*.86,fh*.42,.08,0x24384c);K.box(w/2+.03,2+f*fh,0,.08,fh*.42,d*.8,0x24384c);K.box(-w/2-.03,2+f*fh,0,.08,fh*.42,d*.8,0x24384c);}
   if(h>16){K.box(w*.2,h+1.6,0,w*.25,2.6,d*.25,0x9a9da2);K.cyl(-w*.25,h+1.5,d*.2,1.6,2,1.6,0x3a3d42);}
   circles.push([q.x,q.z,Math.max(w,d)*.5]);
@@ -3259,25 +3283,62 @@ const tuks=(i,s,n)=>{for(let c=0;c<n;c++)PARKQ.push({k:'tuk',c:[0xf2c022,0x2c9a5
 
 /* ---- draw all the plants and kit pieces ---- */
 (function(){
+  /* Photoreal hybrid: real 3D glTF trunks, canopies and pinnate palm fronds
+     draped in PBR bark / leaf textures, batched into the same 600 m chunks. */
+  const WM=window.WORLD_MODELS, glbOK=!!(WM&&WM.ready());
+  const SG=(n,f)=>glbOK?WM.sceneryGroup(n,f):null;
+
+  /* ---------------- coconut palms ---------------- */
   const tr=[],fr=[];
-  palmL.forEach(p=>{const s=p[3],lean=(R_()-.5)*.14;tr.push([p[0],p[1],p[2],s,s,s,R_()*TAU,undefined,lean]);for(let k=0;k<7;k++)fr.push([p[0],p[1]+9*s,p[2],s,s,s,k/7*TAU+R_()*.4,undefined,-1.15-R_()*.35]);});
-  instSet(new THREE.CylinderGeometry(.17,.3,9,7).translate(0,4.5,0),new THREE.MeshStandardMaterial({color:0x7a6247,roughness:1}),tr,true);
-  const fg=new THREE.PlaneGeometry(1.3,5.2,2,5),fp=fg.attributes.position;
-  for(let i=0;i<fp.count;i++){const y=fp.getY(i)+2.6;fp.setZ(i,-.07*y*y);fp.setY(i,y);fp.setX(i,fp.getX(i)*(1-y/6.2));}
-  fg.computeVertexNormals();
-  instSet(fg,new THREE.MeshStandardMaterial({color:0x3f8a2c,side:THREE.DoubleSide,roughness:.8}),fr,true);
+  palmL.forEach(p=>{const s=p[3],lean=(R_()-.5)*.14;tr.push([p[0],p[1],p[2],s,s,s,R_()*TAU,undefined,lean]);
+    if(!glbOK)for(let k=0;k<7;k++)fr.push([p[0],p[1]+9*s,p[2],s,s,s,k/7*TAU+R_()*.4,undefined,-1.15-R_()*.35]);});
+  const palmTr=SG(['PalmTrunk']), palmCr=SG(['PalmCrown','PalmNuts']);
+  if(palmTr)instSetM(palmTr.geo,palmTr.mats,tr,true);
+  else instSet(new THREE.CylinderGeometry(.17,.3,9,7).translate(0,4.5,0),new THREE.MeshStandardMaterial({color:0x7a6247,roughness:1}),tr,true);
+  if(palmCr){const pc2=[];palmL.forEach(p=>{const s=p[3];pc2.push([p[0],p[1]+9*s,p[2],s,s,s,R_()*TAU]);});instSetM(palmCr.geo,palmCr.mats,pc2,true);}
+  else{
+    const fg=new THREE.PlaneGeometry(1.3,5.2,2,5),fp=fg.attributes.position;
+    for(let i=0;i<fp.count;i++){const y=fp.getY(i)+2.6;fp.setZ(i,-.07*y*y);fp.setY(i,y);fp.setX(i,fp.getX(i)*(1-y/6.2));}
+    fg.computeVertexNormals();
+    instSet(fg,new THREE.MeshStandardMaterial({color:0x3f8a2c,side:THREE.DoubleSide,roughness:.8}),fr,true);
+  }
+
+  /* ---------------- broadleaf trees ---------------- */
   const tt=[],tc=[],pal=[0x2f6e2c,0x3c8236,0x24582a,0x4a9a3a,0x6a9a2e];
   treeL.forEach(p=>{const s=p[3],col=p[4]||pick(pal);tt.push([p[0],p[1],p[2],s,s,s,R_()*TAU]);
-    for(let k=0;k<3;k++){const w=rnR(3.2,4.6)*s;tc.push([p[0]+rnR(-1.6,1.6)*s,p[1]+(5.6+k*.7)*s,p[2]+rnR(-1.6,1.6)*s,w,w*.72,w,R_()*TAU,col]);}});
-  instSet(new THREE.CylinderGeometry(.28,.5,5,7).translate(0,2.5,0),new THREE.MeshStandardMaterial({color:0x5a4634,roughness:1}),tt,true);
-  instSet(new THREE.IcosahedronGeometry(1,1),new THREE.MeshStandardMaterial({roughness:.9}),tc,true);
-  const rt=[],rc=[];rubL.forEach(p=>{const s=p[3];rt.push([p[0],p[1],p[2],s,s,s,R_()*TAU]);rc.push([p[0],p[1]+10.4*s,p[2],2.7*s,2.3*s,2.7*s,R_()*TAU,pick([0x4f8a3a,0x5d9a42,0x467d33])]);});
-  instSet(new THREE.CylinderGeometry(.11,.17,10,6).translate(0,5,0),new THREE.MeshStandardMaterial({color:0x9a9488,roughness:1}),rt,true);
-  instSet(new THREE.IcosahedronGeometry(1,0),new THREE.MeshStandardMaterial({roughness:.9}),rc,false);
-  const pt=[],pcn=[];pineL.forEach(p=>{const s=p[3];pt.push([p[0],p[1],p[2],s,s,s,0]);pcn.push([p[0],p[1]+6.2*s,p[2],3.3*s,5.2*s,3.3*s,R_()*TAU,0x1f4f2a],[p[0],p[1]+9.4*s,p[2],2.2*s,4.2*s,2.2*s,R_()*TAU,0x26603a]);});
-  instSet(new THREE.CylinderGeometry(.15,.26,7,6).translate(0,3.5,0),new THREE.MeshStandardMaterial({color:0x4a3a2c,roughness:1}),pt,false);
-  instSet(new THREE.ConeGeometry(.5,1,8),new THREE.MeshStandardMaterial({roughness:.9}),pcn,false);
-  instSet(new THREE.IcosahedronGeometry(.5,0),new THREE.MeshStandardMaterial({roughness:.95}),teaL,false);
+    if(glbOK){const w=rnR(2.25,2.95)*s;tc.push([p[0],p[1]+6.6*s,p[2],w,w*.86,w,R_()*TAU]);}
+    else for(let k=0;k<3;k++){const w=rnR(3.2,4.6)*s;tc.push([p[0]+rnR(-1.6,1.6)*s,p[1]+(5.6+k*.7)*s,p[2]+rnR(-1.6,1.6)*s,w,w*.72,w,R_()*TAU,col]);}});
+  const treeTr=SG(['TreeTrunk']), treeCn=SG(['TreeCanopy']);
+  if(treeTr)instSetM(treeTr.geo,treeTr.mats,tt,true);
+  else instSet(new THREE.CylinderGeometry(.28,.5,5,7).translate(0,2.5,0),new THREE.MeshStandardMaterial({color:0x5a4634,roughness:1}),tt,true);
+  if(treeCn)instSetM(treeCn.geo,treeCn.mats,tc,true);
+  else instSet(new THREE.IcosahedronGeometry(1,1),new THREE.MeshStandardMaterial({roughness:.9}),tc,true);
+
+  /* ---------------- rubber trees ---------------- */
+  const rt=[],rc=[];rubL.forEach(p=>{const s=p[3];rt.push([p[0],p[1],p[2],s,s,s,R_()*TAU]);
+    if(glbOK){const w=rnR(2.0,2.45)*s;rc.push([p[0],p[1]+10.4*s,p[2],w,w*.85,w,R_()*TAU]);}
+    else rc.push([p[0],p[1]+10.4*s,p[2],2.7*s,2.3*s,2.7*s,R_()*TAU,pick([0x4f8a3a,0x5d9a42,0x467d33])]);});
+  const rubTr=SG(['RubberTrunk']), rubCn=SG(['RubberCanopy']);
+  if(rubTr)instSetM(rubTr.geo,rubTr.mats,rt,true);
+  else instSet(new THREE.CylinderGeometry(.11,.17,10,6).translate(0,5,0),new THREE.MeshStandardMaterial({color:0x9a9488,roughness:1}),rt,true);
+  if(rubCn)instSetM(rubCn.geo,rubCn.mats,rc,false);
+  else instSet(new THREE.IcosahedronGeometry(1,0),new THREE.MeshStandardMaterial({roughness:.9}),rc,false);
+
+  /* ---------------- pines ---------------- */
+  const pt=[],pcn=[];pineL.forEach(p=>{const s=p[3];pt.push([p[0],p[1],p[2],s,s,s,R_()*TAU]);
+    if(glbOK)pcn.push([p[0],p[1]+5.7*s,p[2],3.55*s,6.4*s,3.55*s,R_()*TAU]);
+    else pcn.push([p[0],p[1]+6.2*s,p[2],3.3*s,5.2*s,3.3*s,R_()*TAU,0x1f4f2a],[p[0],p[1]+9.4*s,p[2],2.2*s,4.2*s,2.2*s,R_()*TAU,0x26603a]);});
+  const pineTr=SG(['PineTrunk']), pineCn=SG(['PineCanopy']);
+  if(pineTr)instSetM(pineTr.geo,pineTr.mats,pt,false);
+  else instSet(new THREE.CylinderGeometry(.15,.26,7,6).translate(0,3.5,0),new THREE.MeshStandardMaterial({color:0x4a3a2c,roughness:1}),pt,false);
+  if(pineCn)instSetM(pineCn.geo,pineCn.mats,pcn,false);
+  else instSet(new THREE.ConeGeometry(.5,1,8),new THREE.MeshStandardMaterial({roughness:.9}),pcn,false);
+
+  /* ---------------- tea bushes ---------------- */
+  const teaBush=SG(['TeaBush']);
+  if(teaBush){const tb=teaL.map(a=>[a[0],a[1],a[2],a[3]*.74,a[4]*.74,a[5]*.74,a[6]]);instSetM(teaBush.geo,teaBush.mats,tb,false);}
+  else instSet(new THREE.IcosahedronGeometry(.5,0),new THREE.MeshStandardMaterial({roughness:.95}),teaL,false);
+
   buildTeaStops();buildJunctions();
   flushPrims();
 })();
@@ -4396,9 +4457,18 @@ function mergeG(g){
   return out;
 }
 function tpl(key,build){const t=memo('tpl'+key,()=>mergeG(build()));return t.clone(true);}
+/* parked vehicles: use the photoreal glTF traffic vehicle when the asset pack is loaded */
+let _pvIdx=0;
+function glbVeh(kind,col,opts){
+  const WM=window.WORLD_MODELS;
+  if(!WM||!WM.ready())return null;
+  try{const g=WM.buildTrafficVehicle(kind,(col!==undefined?col:WM.autoPaint[(_pvIdx++)%WM.autoPaint.length]),opts||{});
+    if(g){g.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true;}});return g;}}catch(e){}
+  return null;
+}
 
 /* ---------------- car: sedan / hatchback in the style of the small Japanese cars everywhere in Sri Lanka ---------------- */
-function mkCar(col){return tpl('car'+col,()=>{
+function mkCar(col){const _g=glbVeh('car',col,{});if(_g)return _g;return tpl('car'+col,()=>{
   const g=new THREE.Group(),P=paintM(col),W=1.74;
   addP(g,exShape(rshape([[-2.1,.34],[-2.15,.62],[-2.08,.92],[-1.5,.99],[1.0,1.0],[1.75,.9],[2.1,.7],[2.14,.46],[2.0,.34]],.14),W,.07),P,0,0,0);
   addP(g,exShape(rshape([[-1.28,.97],[-.97,1.43],[.6,1.45],[1.1,.97]],.07),W-.24,.03),MAT.glass,0,0,0);
@@ -4421,7 +4491,7 @@ function mkCar(col){return tpl('car'+col,()=>{
   return g;});}
 
 /* ---------------- van: Toyota-Hiace style ---------------- */
-function mkVan(col){return tpl('van'+col,()=>{
+function mkVan(col){const _g=glbVeh('van',col,{});if(_g)return _g;return tpl('van'+col,()=>{
   const g=new THREE.Group(),P=paintM(col),W=1.95;
   addP(g,exShape(rshape([[-2.4,.42],[-2.43,1.0],[-2.38,2.0],[-2.2,2.13],[.9,2.16],[1.45,1.96],[1.95,1.3],[2.3,1.08],[2.4,.72],[2.34,.44]],.16),W,.08),P,0,0,0);
   addP(g,BX(W+.015,.13,4.7),paintM(0x2a5fb0),0,.92,0);
@@ -4443,7 +4513,7 @@ function mkVan(col){return tpl('van'+col,()=>{
   return g;});}
 
 /* ---------------- three-wheeler (tuk-tuk) ---------------- */
-function mkTuk(col){return tpl('tuk'+col,()=>{
+function mkTuk(col){const _g=glbVeh('tuk',col,{});if(_g)return _g;return tpl('tuk'+col,()=>{
   const g=new THREE.Group(),P=paintM(col);
   addP(g,exShape(rshape([[.55,.4],[1.05,.4],[1.35,.52],[1.42,.88],[1.3,1.16],[1.0,1.3],[.62,1.26]],.12),.92,.06),P,0,0,0);
   addP(g,exShape(rshape([[.62,.36],[.62,1.0],[.3,1.06],[-1.1,1.0],[-1.36,.9],[-1.4,.46],[-1.2,.36]],.1),1.3,.06),P,0,0,0);
@@ -5576,21 +5646,26 @@ document.getElementById('oagain').addEventListener('click',overRestart);
 /* The driver at the wheel, the conductor riding on the footboard, and one seated passenger for each person you are carrying
    (the bus fills up as you collect people, and empties as they get off). */
 const RIDE={pax:[],driver:null,step:null,n:-1};
+const spec_X=b=>{const e=(b&&b.spec&&b.spec.eyePos);return e?e[0]:-.6;};
 (function(){
   const sit=m=>{m.legs.forEach(l=>{l.rotation.x=-1.35;});return m;};
+  const dp=bus.driverPos||[spec_X(bus),.53,3.84];
   const d=sit(mkPerson({woman:false,wrap:false,shirt:0xf4f4f0,bottom:0x2b3a6a,hair:0x111111,scale:1}));
-  d.position.set(-.6,.53,3.84);d.arms.forEach(a=>{a.rotation.x=-1.2;});bus.tilt.add(d);RIDE.driver=d;
+  d.position.set(dp[0],dp[1],dp[2]);d.arms.forEach(a=>{a.rotation.x=-1.2;});bus.tilt.add(d);RIDE.driver=d;
+  const sp=bus.stepPos||[.92,.62,(PH_DZ0+PH_DZ1)/2];
   const c=mkPerson({woman:false,wrap:false,shirt:0xe8e2d0,bottom:0x3a3f52,hair:0x111111,scale:1});
-  c.position.set(.92,.62,(PH_DZ0+PH_DZ1)/2);c.rotation.y=PI/2;c.arms[1].rotation.x=-2.5;bus.tilt.add(c);RIDE.step=c;   // one hand on the rail, leaning out to look for passengers
+  c.position.set(sp[0],sp[1],sp[2]);c.rotation.y=PI/2;c.arms[1].rotation.x=-2.5;bus.tilt.add(c);RIDE.step=c;   // one hand on the rail, leaning out to look for passengers
   // passengers take the seats in a shuffled order, so the bus fills up unevenly like a real one
   const seats=(bus.seats||[]).slice();for(let i=seats.length-1;i>0;i--){const j=Math.random()*(i+1)|0;[seats[i],seats[j]]=[seats[j],seats[i]];}
-  seats.slice(0,34).forEach(s=>{const m=sit(mkPerson({scale:.94+Math.random()*.08}));m.position.set(s[0],.52,s[1]-.03);m.visible=false;bus.tilt.add(m);RIDE.pax.push(m);});
+  seats.slice(0,34).forEach(s=>{const m=sit(mkPerson({scale:.94+Math.random()*.08}));m.position.set(s[0],s[2]!==undefined?s[2]:.52,s[1]-.03);m.visible=false;bus.tilt.add(m);RIDE.pax.push(m);});
   // once the seats are taken people stand in the aisle, one hand on the rail
-  RIDE.stand=[2.1,1.0,-.1,-1.2,-2.3,-3.4].map((z,i)=>{const m=mkPerson({scale:.96+Math.random()*.06});m.position.set(i%2?.08:-.08,.9,z);m.rotation.y=i%2?PI/2:-PI/2;m.arms[i%2].rotation.x=-2.75;m.visible=false;bus.tilt.add(m);return m;});
+  const flY=bus.floorY||.9;
+  RIDE.stand=[2.1,1.0,-.1,-1.2,-2.3,-3.4].map((z,i)=>{const m=mkPerson({scale:.96+Math.random()*.06});m.position.set(i%2?.08:-.08,flY,z);m.rotation.y=i%2?PI/2:-PI/2;m.arms[i%2].rotation.x=-2.75;m.visible=false;bus.tilt.add(m);return m;});
   // and when even the aisle is full they ride on the footboard, hanging out of the doorway by the handrails
   const dz=(PH_DZ0+PH_DZ1)/2;
-  RIDE.hang=[[1.2,.42,dz-.27,.35],[1.2,.42,dz+.27,-.3],[.62,.82,dz-.26,.2],[.62,.82,dz+.26,-.2],[1.36,.34,dz,0]].map((p,i)=>{
-    const m=mkPerson({woman:false,wrap:false,scale:.97});m.position.set(p[0],p[1],p[2]);m.rotation.y=PI/2+p[3];m.rotation.z=i===4?-.22:-.08;   // leaning out over the road
+  const hangOff=[-.46,-.46,-.06,-.06,-.54];
+  RIDE.hang=[[1.2,0,dz-.27,.35],[1.2,0,dz+.27,-.3],[.62,1,dz-.26,.2],[.62,1,dz+.26,-.2],[1.36,2,dz,0]].map((p,i)=>{
+    const m=mkPerson({woman:false,wrap:false,scale:.97});m.position.set(p[0],flY+hangOff[p[1]],p[2]);m.rotation.y=PI/2+p[3];m.rotation.z=i===4?-.22:-.08;   // leaning out over the road
     m.arms[0].rotation.x=-2.6;m.arms[1].rotation.x=i===4?-2.6:-.3;m.visible=false;bus.tilt.add(m);return m;});
 })();
 function updateRiders(){
@@ -7463,7 +7538,13 @@ frame();
 if(window.LD)LD(100,'Ready');
 }
 if(window.LD)LD(82,'Streaming routes, traffic & modern buses\u2026');
-setTimeout(()=>PHOTO.onReady(startGame),30);
+setTimeout(()=>{
+  const begin=()=>{try{PHOTO.onReady(startGame);}catch(e){console.error(e);}};
+  if(window.WORLD_MODELS){
+    if(window.LD)LD(86,'Loading photoreal 3D fleet &amp; scenery\u2026');
+    try{window.WORLD_MODELS.load(begin);}catch(e){begin();}
+  } else begin();
+},30);
 </script>
 </body>
 </html>
